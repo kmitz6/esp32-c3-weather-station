@@ -232,7 +232,7 @@ void setup() {
 void loop() {
   Serial.println("\nINFO: loop() start");
 
-  updatePulsesPerMin();   // calculate pulses per minute every 3 sec
+  updatePulsesPerMin();   // calculate pulses per minute every N sec
 
   bool pms_ok = readPMS();
   bool bmp_ok = readBMP();
