@@ -24,9 +24,12 @@ const int sclPin = 7;
 const int GREEN_LED = 2;  // blinks on HTTP 200 OK
 const int RED_LED   = 10; // stays ON on error
 
-// ---------------- ANEMOMETER ----------------
-const int IR_PIN = 8;                // GPIO for IR sensor
-volatile int irPulseCount = 0;       // incremented in ISR
+// ---------------- IR SWITCH (Wind Speed) with debounce ----------------
+const int IR_PIN = 8;
+volatile int irPulseCount = 0;
+volatile unsigned long lastIrTime = 0;
+const unsigned long DEBOUNCE_US = 5000;   // 5 ms debounce (adjust if needed)
+
 unsigned long lastWindCalc = 0;      // last time wind speed was calculated
 int pulsesPerMin = 0;                // computed pulses per minute
 
@@ -38,9 +41,13 @@ unsigned long lastSend = 0;
 unsigned long lastValid = 0;
 char httpBuffer[300];
 
-// ---------------- IR INTERRUPT SERVICE ROUTINE ----------------
+// ---------------- IR INTERRUPT SERVICE ROUTINE (debounced) ----------------
 void IRAM_ATTR irISR() {
-  irPulseCount++;   // count every falling edge (hole passes)
+  unsigned long now = micros();
+  if (now - lastIrTime > DEBOUNCE_US) {
+    irPulseCount++;
+    lastIrTime = now;
+  }
 }
 
 // ---------------- PULSES PER MINUTE CALCULATION ----------------
@@ -175,12 +182,12 @@ void setup() {
 
   Serial.println("=== ESP32-C3 Boot ===");
 
-  // IR sensor setup
+  // IR sensor with debounce
   pinMode(IR_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(IR_PIN), irISR, FALLING);
   Serial.print("IR sensor on GPIO ");
   Serial.print(IR_PIN);
-  Serial.println(" configured with falling edge interrupt");
+  Serial.println(" configured with falling edge interrupt and 5ms debounce");
   lastWindCalc = millis();
 
   pms.begin(9600, SERIAL_8N1, rxPin, txPin);
