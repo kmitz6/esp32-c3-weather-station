@@ -76,10 +76,10 @@ void updatePulsesPerMin() {
     Serial.print(irPulseCount);
     Serial.print(" -> ");
     Serial.print(pulsesPerMin);
-    Serial.println(" pulses/min");
-    Serial.println("(");
-    Serial.println(windKmh);
-    Serial.println("kmh");
+    Serial.printl" pulses/min");
+    Serial.print("(");
+    Serial.print(windKmh);
+    Serial.println("kmh)");
     
     irPulseCount = 0;
     lastWindCalc = now;
@@ -87,7 +87,7 @@ void updatePulsesPerMin() {
 }
 
 // ---------------- HTTP ----------------
-void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin) {
+void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, float speedEstimate) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("ERR: WiFi connection failed");
     return;
@@ -103,7 +103,7 @@ void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin) {
   char payload[160];
   snprintf(payload, sizeof(payload),
            "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.2f,\"pressure\":%.2f,\"pulses_per_min\":%d,\"ts\":%lu}",
-           pm25, pm10, temp, pres, pulsesPerMin, millis());
+           pm25, pm10, temp, pres, pulsesPerMin, speedEstimate, millis());
 // due to some data conversion errors I rolled back to manually writing a call
   int len = snprintf(httpBuffer, sizeof(httpBuffer),
                      "POST %s HTTP/1.1\r\n"
@@ -250,7 +250,7 @@ void loop() {
 
   if (millis() - lastSend >= 10000) {
     if (sensorSeen) {
-      sendData(pm25, pm10, temperature, pressure, pulsesPerMin);
+      sendData(pm25, pm10, temperature, pressure, pulsesPerMin, windKmh);
     } else {
       sendData(0, 0, 0.0, 0.0, pulsesPerMin);
     }
