@@ -76,10 +76,10 @@ void updatePulsesPerMin() {
     Serial.print(irPulseCount);
     Serial.print(" -> ");
     Serial.print(pulsesPerMin);
-    Serial.printl" pulses/min");
+    Serial.printl" pulses/min ");
     Serial.print("(");
     Serial.print(windKmh);
-    Serial.println("kmh)");
+    Serial.println(" kmh)");
     
     irPulseCount = 0;
     lastWindCalc = now;
@@ -87,7 +87,7 @@ void updatePulsesPerMin() {
 }
 
 // ---------------- HTTP ----------------
-void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, float speedEstimate) {
+void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, float windKmh) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("ERR: WiFi connection failed");
     return;
@@ -100,10 +100,10 @@ void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, floa
   }
 
   
-  char payload[160];
+  char payload[180];  // larger buffer
   snprintf(payload, sizeof(payload),
-           "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.2f,\"pressure\":%.2f,\"pulses_per_min\":%d,\"ts\":%lu}",
-           pm25, pm10, temp, pres, pulsesPerMin, speedEstimate, millis());
+           "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.2f,\"pressure\":%.2f,\"pulses_per_min\":%d,\"wind_kmh\":%.2f,\"ts\":%lu}",
+           pm25, pm10, temp, pres, pulsesPerMin, windKmh, millis());
 // due to some data conversion errors I rolled back to manually writing a call
   int len = snprintf(httpBuffer, sizeof(httpBuffer),
                      "POST %s HTTP/1.1\r\n"
@@ -169,8 +169,8 @@ bool readPMS() {
   pm25 = (buf[4] << 8) | buf[5];
   pm10 = (buf[6] << 8) | buf[7];
 
-  Serial.print("PM2.5: "); Serial.println(pm25);
-  Serial.print("PM10 : "); Serial.println(pm10);
+  Serial.print("PM2.5: "); Serial.print(pm25);
+  Serial.print(", PM10 : "); Serial.println(pm10);
 
   return true;
 }
@@ -182,8 +182,8 @@ bool readBMP() {
 
   if (isnan(temperature) || isnan(pressure)) return false;
 
-  Serial.print("Temp: "); Serial.println(temperature);
-  Serial.print("Pressure: "); Serial.println(pressure);
+  Serial.print("Temp: "); Serial.print(temperature);
+  Serial.print(", Pressure: "); Serial.println(pressure);
 
   return true;
 }
@@ -202,7 +202,7 @@ void setup() {
   pinMode(IR_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(IR_PIN), irISR, FALLING);
   lastWindCalc = millis();
-  Serial.print("INFO: Transoptical sensor initiated");
+  Serial.println("INFO: Transoptical sensor initiated");
   Serial.print(IR_PIN);
   delay(1000);
 
@@ -222,7 +222,7 @@ void setup() {
     delay(500);
   }
   if (WiFi.status() == WL_CONNECTED) Serial.println("\nWiFi connected");
-  else Serial.println("\nERR: WiFi timeout");
+  else Serial.println("ERR: WiFi timeout");
   delay(2000);
 
   lastValid = millis();
@@ -230,7 +230,7 @@ void setup() {
 
 // ---------------- LOOP ----------------
 void loop() {
-  Serial.println("\nINFO: loop() start");
+  Serial.println("INFO: loop() start");
 
   updatePulsesPerMin();   // calculate pulses per minute every N sec
 
@@ -243,7 +243,7 @@ void loop() {
   } else {
     if (millis() - lastValid > 30000) {
       sensorSeen = false;
-      Serial.println("\nERR: No sensor data detected.");
+      Serial.println("ERR: No sensor data detected.");
       delay(2000);
     }
   }
