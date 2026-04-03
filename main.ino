@@ -24,6 +24,12 @@ const int sclPin = 7;
 const int GREEN_LED = 2;  // blinks on HTTP 200 OK
 const int RED_LED   = 10; // stays ON on error
 
+// ---------------- ANEMOMETER ----------------
+const int IR_PIN = 8;                // GPIO for IR sensor
+volatile int irPulseCount = 0;       // incremented in ISR
+unsigned long lastWindCalc = 0;      // last time wind speed was calculated
+int pulsesPerMin = 0;                // computed pulses per minute
+
 // ---------------- DATA ----------------
 int pm25 = 0, pm10 = 0;
 float temperature = 0.0f, pressure = 0.0f;
@@ -32,8 +38,34 @@ unsigned long lastSend = 0;
 unsigned long lastValid = 0;
 char httpBuffer[300];
 
+// ---------------- IR INTERRUPT SERVICE ROUTINE ----------------
+void IRAM_ATTR irISR() {
+  irPulseCount++;   // count every falling edge (hole passes)
+}
+
+// ---------------- PULSES PER MINUTE CALCULATION ----------------
+void updatePulsesPerMin() {
+  unsigned long now = millis();
+  unsigned long dt = now - lastWindCalc;
+  if (dt >= 3000) {   // calculate every 3 seconds
+    float pulsesPerSec = (float)irPulseCount / (dt / 1000.0);
+    pulsesPerMin = (int)(pulsesPerSec * 60.0);
+    
+    Serial.print("[Wind] Pulses in last ");
+    Serial.print(dt);
+    Serial.print(" ms: ");
+    Serial.print(irPulseCount);
+    Serial.print(" -> ");
+    Serial.print(pulsesPerMin);
+    Serial.println(" pulses/min");
+    
+    irPulseCount = 0;
+    lastWindCalc = now;
+  }
+}
+
 // ---------------- HTTP ----------------
-void sendData(int pm25, int pm10, float temp, float pres) {
+void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi not connected, skipping POST");
     digitalWrite(RED_LED, HIGH);
@@ -47,10 +79,10 @@ void sendData(int pm25, int pm10, float temp, float pres) {
     return;
   }
 
-  char payload[128];
+  char payload[160];
   snprintf(payload, sizeof(payload),
-           "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.2f,\"pressure\":%.2f,\"ts\":%lu}",
-           pm25, pm10, temp, pres, millis());
+           "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.2f,\"pressure\":%.2f,\"pulses_per_min\":%d,\"ts\":%lu}",
+           pm25, pm10, temp, pres, pulsesPerMin, millis());
 
   int len = snprintf(httpBuffer, sizeof(httpBuffer),
                      "POST %s HTTP/1.1\r\n"
@@ -80,14 +112,13 @@ void sendData(int pm25, int pm10, float temp, float pres) {
 
   if (gotHTTP200) {
     Serial.println("Data sent successfully (HTTP 200)");
-    // Blink GREEN LED
     digitalWrite(GREEN_LED, HIGH);
     delay(200);
     digitalWrite(GREEN_LED, LOW);
-    digitalWrite(RED_LED, LOW); // reset RED LED if previously on
+    digitalWrite(RED_LED, LOW);
   } else {
     Serial.println("HTTP Error!");
-    digitalWrite(RED_LED, HIGH); // permanent RED
+    digitalWrite(RED_LED, HIGH);
   }
 }
 
@@ -144,6 +175,14 @@ void setup() {
 
   Serial.println("=== ESP32-C3 Boot ===");
 
+  // IR sensor setup
+  pinMode(IR_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(IR_PIN), irISR, FALLING);
+  Serial.print("IR sensor on GPIO ");
+  Serial.print(IR_PIN);
+  Serial.println(" configured with falling edge interrupt");
+  lastWindCalc = millis();
+
   pms.begin(9600, SERIAL_8N1, rxPin, txPin);
   Serial.println("PMS UART started");
 
@@ -168,6 +207,8 @@ void setup() {
 void loop() {
   Serial.println("\n--- Loop Start ---");
 
+  updatePulsesPerMin();   // calculate pulses per minute every 3 sec
+
   bool pms_ok = readPMS();
   bool bmp_ok = readBMP();
 
@@ -182,9 +223,11 @@ void loop() {
   }
 
   if (millis() - lastSend >= 10000) {
-    if (sensorSeen) sendData(pm25, pm10, temperature, pressure);
-    else sendData(0, 0, 0.0, 0.0);
-
+    if (sensorSeen) {
+      sendData(pm25, pm10, temperature, pressure, pulsesPerMin);
+    } else {
+      sendData(0, 0, 0.0, 0.0, pulsesPerMin);
+    }
     lastSend = millis();
   }
 
