@@ -56,28 +56,15 @@ void updatePulsesPerMin() {
   if (dt >= 1000) {
     float pulsesPerSec = (float)irPulseCount / (dt / 1000.0);
     pulsesPerMin = (int)(pulsesPerSec * 60.0);
-    windKmh = pulsesPerMin * 0.0011781;   // conversion factor
-// ============================================================
-// Wind speed conversion factor:
-// fly wheel diameter = 5 cm
-// Circumference = π * diameter = π * 5 cm = 15.70796 cm
-// 8 holes per revolution → distance per pulse = circumference / 8
-//   = 15.70796 / 8 = 1.963495 cm per pulse
-//
-// Pulses per minute (P) → distance per minute = P * 1.963495 cm/min
-// Convert cm/min to km/h:
-//   km/h = (cm/min * 60 min/h) / (100000 cm/km)
-//        = P * 1.963495 * 60 / 100000
-//        = P * 0.001178097
-// Rounded to 0.0011781
-    Serial.print("[Wind] Pulses in last ");
+    windKmh = pulsesPerMin * 0.01;   // conversion factor
+    Serial.print("DATA: Wind - pulses in last ");
     Serial.print(dt);
     Serial.print(" ms: ");
     Serial.print(irPulseCount);
     Serial.print(" -> ");
     Serial.print(pulsesPerMin);
-    Serial.printl" pulses/min ");
-    Serial.print("(");
+    Serial.print(" pulses/min ");
+    Serial.print("(~");
     Serial.print(windKmh);
     Serial.println(" kmh)");
     
@@ -90,12 +77,24 @@ void updatePulsesPerMin() {
 void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, float windKmh) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("ERR: WiFi connection failed");
+    for(int i = 0; i < 3; i++) {
+      digitalWrite(GREEN_LED, HIGH);
+      delay(250);
+      digitalWrite(GREEN_LED, LOW);
+      delay(250);    
+    }
     return;
   }
 
   WiFiClient client;
   if (!client.connect(host, port)) {
     Serial.println("ERR: Server connection failed");
+    for(int i = 0; i < 3; i++) {
+      digitalWrite(GREEN_LED, HIGH);
+      delay(250);
+      digitalWrite(GREEN_LED, LOW);
+      delay(250);    
+    }
     return;
   }
 
@@ -122,7 +121,6 @@ void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, floa
   while (millis() - timeout < 2000) {
     if (client.available()) {
       String line = client.readStringUntil('\n');
-      Serial.println(line);
       if (line.startsWith("HTTP/1.1 200") || line.startsWith("HTTP/1.0 200")) {
         gotHTTP200 = true;
       }
@@ -137,8 +135,8 @@ void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, floa
     delay(750);
     digitalWrite(GREEN_LED, LOW);
   } else {
-    Serial.println("HTTP Error!");
-    for(int i = 1; i <= 3; i++) {
+    Serial.println("ERR: HTTP Error!");
+    for(int i = 0; i < 3; i++) {
       digitalWrite(GREEN_LED, HIGH);
       delay(250);
       digitalWrite(GREEN_LED, LOW);
@@ -169,7 +167,7 @@ bool readPMS() {
   pm25 = (buf[4] << 8) | buf[5];
   pm10 = (buf[6] << 8) | buf[7];
 
-  Serial.print("PM2.5: "); Serial.print(pm25);
+  Serial.print("DATA: Air quality - PM2.5: "); Serial.print(pm25);
   Serial.print(", PM10 : "); Serial.println(pm10);
 
   return true;
@@ -182,7 +180,7 @@ bool readBMP() {
 
   if (isnan(temperature) || isnan(pressure)) return false;
 
-  Serial.print("Temp: "); Serial.print(temperature);
+  Serial.print("DATA: BMP280 - Temp: "); Serial.print(temperature);
   Serial.print(", Pressure: "); Serial.println(pressure);
 
   return true;
@@ -202,22 +200,21 @@ void setup() {
   pinMode(IR_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(IR_PIN), irISR, FALLING);
   lastWindCalc = millis();
-  Serial.println("INFO: Transoptical sensor initiated");
-  Serial.print(IR_PIN);
+  Serial.println("INFO: Transoptical sensor initiated - windspeed");
   delay(1000);
 
-  pms.begin(9600, SERIAL_8N1, rxPin, txPin);
-  Serial.println("INFO: Init PM sensor");
+  pms.begin(9600, SERIAL_8N1, rxPin);
+  Serial.println("INFO: PMS5003 initialized");
   delay(1000);
 
   Wire.begin(sdaPin, sclPin);
   if (!bmp.begin(0x76)) Serial.println("ERR: Temp/pressure sensor no signal");
-  else Serial.println("INFO: Temp/pressure sensor initiated");
+  else Serial.println("INFO: BMP280 Temp/pressure sensor initiated");
 
   Serial.print("INFO: Connecting WiFi");
   WiFi.begin(ssid, password);
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 10000) {
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
     Serial.print(".");
     delay(500);
   }
@@ -252,7 +249,7 @@ void loop() {
     if (sensorSeen) {
       sendData(pm25, pm10, temperature, pressure, pulsesPerMin, windKmh);
     } else {
-      sendData(0, 0, 0.0, 0.0, pulsesPerMin);
+      sendData(0, 0, 0.0, 0.0, 0, 0.0);
     }
     lastSend = millis();
   }
