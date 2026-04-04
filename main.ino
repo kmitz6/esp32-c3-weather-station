@@ -11,7 +11,7 @@ const int   port     = 5000;
 const char* path     = "/api/sensors";
 
 // PMS5003 air quality sensor
-HardwareSerial pms(0);
+HardwareSerial pms(1);
 const int rxPin = 20;  // PMS TX -> ESP RX
 
 // BMP280 temperature and pressure sensor
@@ -20,13 +20,13 @@ const int sdaPin = 6;
 const int sclPin = 7;
 
 // transmit LED
-const int GREEN_LED = 2;  // blinks on HTTP 200 OK
+const int GREEN_LED = 2;
 
 // anemometer
 const int IR_PIN = 8;
-volatile int irPulseCount = 0;
+volatile unsigned long irPulseCount = 0;
 volatile unsigned long lastIrTime = 0;
-const unsigned long DEBOUNCE_US = 5000;  // to be adjusted if sensor returns more than one pulse per window or if loses a beat
+const unsigned long DEBOUNCE_US = 5000;
 float windKmh = 0.0;
 
 unsigned long lastWindCalc = 0;
@@ -38,7 +38,15 @@ float temperature = 0.0f, pressure = 0.0f;
 bool sensorSeen = false;
 unsigned long lastSend = 0;
 unsigned long lastValid = 0;
-char httpBuffer[300];
+char httpBuffer[512];
+
+// non-blocking sensor read timer
+unsigned long lastSensorRead = 0;
+const unsigned long SENSOR_READ_INTERVAL = 2000;
+
+// for recovery after long sensor loss
+unsigned long lastAnySensorOk = 0;
+bool sensorsNeedReinit = false;
 
 // interrupt routine for the ir transoptor
 void IRAM_ATTR irISR() {
@@ -73,7 +81,26 @@ void updatePulsesPerMin() {
   }
 }
 
-// ---------------- HTTP ----------------
+// WiFi reconnect function
+void WiFiReconnect() {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("INFO: WiFi lost, reconnecting...");
+    WiFi.disconnect();
+    WiFi.begin(ssid, password);
+    unsigned long start = millis();
+    while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
+      delay(500);
+      Serial.print(".");
+    }
+    if (WiFi.status() == WL_CONNECTED) {
+      Serial.println("\nWiFi reconnected");
+    } else {
+      Serial.println("\nERR: WiFi reconnect timeout");
+    }
+  }
+}
+
+// HTTP POST
 void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, float windKmh) {
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("ERR: WiFi connection failed");
@@ -98,12 +125,11 @@ void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, floa
     return;
   }
 
-  
-  char payload[180];  // larger buffer
+  char payload[256];
   snprintf(payload, sizeof(payload),
            "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.2f,\"pressure\":%.2f,\"pulses_per_min\":%d,\"wind_kmh\":%.2f,\"ts\":%lu}",
            pm25, pm10, temp, pres, pulsesPerMin, windKmh, millis());
-// due to some data conversion errors I rolled back to manually writing a call
+
   int len = snprintf(httpBuffer, sizeof(httpBuffer),
                      "POST %s HTTP/1.1\r\n"
                      "Host: %s\r\n"
@@ -118,7 +144,8 @@ void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, floa
   unsigned long timeout = millis();
   bool gotHTTP200 = false;
 
-  while (millis() - timeout < 2000) {
+  // increased timeout to 5 seconds
+  while (millis() - timeout < 5000) {
     if (client.available()) {
       String line = client.readStringUntil('\n');
       if (line.startsWith("HTTP/1.1 200") || line.startsWith("HTTP/1.0 200")) {
@@ -145,7 +172,7 @@ void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, floa
   }
 }
 
-// ---------------- PMS READ ----------------
+// PMS5003 data read
 bool readPMS() {
   while (pms.available()) {
     if (pms.peek() == 0x42) break;
@@ -173,7 +200,7 @@ bool readPMS() {
   return true;
 }
 
-// ---------------- BMP READ ----------------
+// BMP280 READ
 bool readBMP() {
   temperature = bmp.readTemperature();
   pressure = bmp.readPressure() / 100.0F;
@@ -186,7 +213,27 @@ bool readBMP() {
   return true;
 }
 
-// ---------------- SETUP ----------------
+// SENSOR REINIT
+void reinitSensors() {
+  Serial.println("INFO: Re-initializing sensors...");
+  // Reinit I2C
+  Wire.end();
+  delay(100);
+  Wire.begin(sdaPin, sclPin);
+  if (!bmp.begin(0x76)) {
+    Serial.println("ERR: BMP280 reinit failed");
+  } else {
+    Serial.println("INFO: BMP280 reinit OK");
+  }
+  // Reinit UART for PMS
+  pms.end();
+  delay(100);
+  pms.begin(9600, SERIAL_8N1, rxPin);
+  Serial.println("INFO: PMS5003 reinit attempted");
+  sensorsNeedReinit = false;
+}
+
+// SETUP
 void setup() {
   Serial.begin(115200);
   delay(2000);
@@ -223,28 +270,52 @@ void setup() {
   delay(2000);
 
   lastValid = millis();
+  lastAnySensorOk = millis();
+  lastSensorRead = millis();
 }
 
-// ---------------- LOOP ----------------
+// LOOP
 void loop() {
-  Serial.println("INFO: loop() start");
+  // 1. Update wind speed (always, non-blocking)
+  updatePulsesPerMin();
 
-  updatePulsesPerMin();   // calculate pulses per minute every N sec
+  // 2. Read sensors every SENSOR_READ_INTERVAL ms (non-blocking)
+  if (millis() - lastSensorRead >= SENSOR_READ_INTERVAL) {
+    lastSensorRead = millis();
 
-  bool pms_ok = readPMS();
-  bool bmp_ok = readBMP();
+    bool pms_ok = readPMS();
+    bool bmp_ok = readBMP();
 
-  if (pms_ok || bmp_ok) {
-    sensorSeen = true;
-    lastValid = millis();
-  } else {
-    if (millis() - lastValid > 30000) {
-      sensorSeen = false;
-      Serial.println("ERR: No sensor data detected.");
-      delay(2000);
+    if (pms_ok || bmp_ok) {
+      sensorSeen = true;
+      lastValid = millis();
+      lastAnySensorOk = millis();
+      sensorsNeedReinit = false;  // at least one sensor works
+    } else {
+      if (millis() - lastValid > 30000) {
+        sensorSeen = false;
+        Serial.println("ERR: No sensor data detected.");
+      }
+      // If no sensor data for 60 seconds, try to reinit
+      if (millis() - lastAnySensorOk > 60000 && !sensorsNeedReinit) {
+        sensorsNeedReinit = true;
+        Serial.println("ERR: Both sensors failed for 60s, will reinit");
+      }
     }
   }
 
+  // 3. Reinit sensors if needed (only once, then cleared on success)
+  if (sensorsNeedReinit) {
+    reinitSensors();
+    delay(500);
+  }
+
+  // 4. Check WiFi and reconnect if needed
+  if (WiFi.status() != WL_CONNECTED) {
+    WiFiReconnect();
+  }
+
+  // 5. Send data every 10 seconds
   if (millis() - lastSend >= 10000) {
     if (sensorSeen) {
       sendData(pm25, pm10, temperature, pressure, pulsesPerMin, windKmh);
@@ -253,6 +324,4 @@ void loop() {
     }
     lastSend = millis();
   }
-
-  delay(2000);
 }
