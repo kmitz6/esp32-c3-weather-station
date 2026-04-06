@@ -81,22 +81,38 @@ void updatePulsesPerMin() {
   }
 }
 
-// WiFi reconnect function
-void WiFiReconnect() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("INFO: WiFi lost, reconnecting...");
-    WiFi.disconnect();
-    WiFi.begin(ssid, password);
-    unsigned long start = millis();
-    while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
-      delay(500);
-      Serial.print(".");
-    }
-    if (WiFi.status() == WL_CONNECTED) {
-      Serial.println("\nWiFi reconnected");
-    } else {
-      Serial.println("\nERR: WiFi reconnect timeout");
-    }
+void WiFiConnnect() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
+  Serial.println("INFO: WiFi lost, attempting full reconnect...");
+
+  // Full WiFi stack reset - this is the key fix for the "cannot set config" error
+  WiFi.disconnect(true, true);   // disconnect + erase old config
+  delay(100);
+
+  WiFi.mode(WIFI_OFF);           // completely power down the radio
+  delay(200);
+
+  WiFi.mode(WIFI_STA);           // restart in station mode
+  delay(100);
+
+  WiFi.begin(ssid, password);
+
+  Serial.print("Connecting to WiFi");
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 25000) {  // 25s timeout
+    delay(500);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nINFO: WiFi reconnected successfully");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nERR: WiFi reconnect timeout");
   }
 }
 
@@ -312,7 +328,7 @@ void loop() {
 
   // 4. Check WiFi and reconnect if needed
   if (WiFi.status() != WL_CONNECTED) {
-    WiFiReconnect();
+    WiFiConnect();
   }
 
   // 5. Send data every 10 seconds
