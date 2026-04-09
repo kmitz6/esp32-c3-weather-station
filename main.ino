@@ -61,7 +61,7 @@ void IRAM_ATTR irISR() {
 void updatePulsesPerMin() {
   unsigned long now = millis();
   unsigned long dt = now - lastWindCalc;
-  if (dt >= 1000) {
+  if (dt >= 3000) {
     float pulsesPerSec = (float)irPulseCount / (dt / 1000.0);
     pulsesPerMin = (int)(pulsesPerSec * 60.0);
     windKmh = pulsesPerMin * 0.01;   // conversion factor
@@ -78,113 +78,6 @@ void updatePulsesPerMin() {
     
     irPulseCount = 0;
     lastWindCalc = now;
-  }
-}
-
-void WiFiConnnect() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return;
-  }
-
-  Serial.println("INFO: WiFi lost, attempting full reconnect...");
-
-  // Full WiFi stack reset - this is the key fix for the "cannot set config" error
-  WiFi.disconnect(true, true);   // disconnect + erase old config
-  delay(100);
-
-  WiFi.mode(WIFI_OFF);           // completely power down the radio
-  delay(200);
-
-  WiFi.mode(WIFI_STA);           // restart in station mode
-  delay(100);
-
-  WiFi.begin(ssid, password);
-
-  Serial.print("Connecting to WiFi");
-  unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 25000) {  // 25s timeout
-    delay(500);
-    Serial.print(".");
-  }
-
-  if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nINFO: WiFi reconnected successfully");
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
-  } else {
-    Serial.println("\nERR: WiFi reconnect timeout");
-  }
-}
-
-// HTTP POST
-void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, float windKmh) {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("ERR: WiFi connection failed");
-    for(int i = 0; i < 3; i++) {
-      digitalWrite(GREEN_LED, HIGH);
-      delay(250);
-      digitalWrite(GREEN_LED, LOW);
-      delay(250);    
-    }
-    return;
-  }
-
-  WiFiClient client;
-  if (!client.connect(host, port)) {
-    Serial.println("ERR: Server connection failed");
-    for(int i = 0; i < 3; i++) {
-      digitalWrite(GREEN_LED, HIGH);
-      delay(250);
-      digitalWrite(GREEN_LED, LOW);
-      delay(250);    
-    }
-    return;
-  }
-
-  char payload[256];
-  snprintf(payload, sizeof(payload),
-           "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.2f,\"pressure\":%.2f,\"pulses_per_min\":%d,\"wind_kmh\":%.2f,\"ts\":%lu}",
-           pm25, pm10, temp, pres, pulsesPerMin, windKmh, millis());
-
-  int len = snprintf(httpBuffer, sizeof(httpBuffer),
-                     "POST %s HTTP/1.1\r\n"
-                     "Host: %s\r\n"
-                     "Content-Type: application/json\r\n"
-                     "Content-Length: %d\r\n"
-                     "\r\n"
-                     "%s",
-                     path, host, strlen(payload), payload);
-
-  client.write((uint8_t*)httpBuffer, len);
-
-  unsigned long timeout = millis();
-  bool gotHTTP200 = false;
-
-  // increased timeout to 5 seconds
-  while (millis() - timeout < 5000) {
-    if (client.available()) {
-      String line = client.readStringUntil('\n');
-      if (line.startsWith("HTTP/1.1 200") || line.startsWith("HTTP/1.0 200")) {
-        gotHTTP200 = true;
-      }
-    }
-  }
-
-  client.stop();
-
-  if (gotHTTP200) {
-    Serial.println("INFO: Data sent successfully (HTTP 200)");
-    digitalWrite(GREEN_LED, HIGH);
-    delay(750);
-    digitalWrite(GREEN_LED, LOW);
-  } else {
-    Serial.println("ERR: HTTP Error!");
-    for(int i = 0; i < 3; i++) {
-      digitalWrite(GREEN_LED, HIGH);
-      delay(250);
-      digitalWrite(GREEN_LED, LOW);
-      delay(250);    
-    }
   }
 }
 
@@ -231,22 +124,133 @@ bool readBMP() {
 
 // SENSOR REINIT
 void reinitSensors() {
-  Serial.println("INFO: Re-initializing sensors...");
+  Serial.println("REINIT: Restating sensors.");
   // Reinit I2C
   Wire.end();
   delay(100);
   Wire.begin(sdaPin, sclPin);
   if (!bmp.begin(0x76)) {
-    Serial.println("ERR: BMP280 reinit failed");
+    Serial.println("REINIT: BMP280 reinit failed");
   } else {
-    Serial.println("INFO: BMP280 reinit OK");
+    Serial.println("REINIT: BMP280 reinit OK");
   }
   // Reinit UART for PMS
   pms.end();
   delay(100);
   pms.begin(9600, SERIAL_8N1, rxPin);
-  Serial.println("INFO: PMS5003 reinit attempted");
+  Serial.println("REINIT: PMS5003 reinit attempt");
   sensorsNeedReinit = false;
+}
+void WiFiReconnect() {
+  if (WiFi.status() == WL_CONNECTED) {
+    return;
+  }
+
+  Serial.println("WIFI: Connection lost, attempting full reconnect...");
+
+  // Full WiFi stack reset - this is the key fix for the "cannot set config" error
+  WiFi.disconnect(true, true);   // disconnect + erase old config
+  delay(100);
+
+  WiFi.mode(WIFI_OFF);           // completely power down the radio
+  delay(200);
+
+  WiFi.mode(WIFI_STA);           // restart in station mode
+  delay(100);
+
+  WiFi.begin(ssid, password);
+  delay(5000);
+  Serial.print("WIFI: Connecting to ");
+  Serial.print(ssid);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 25000) {  // 25s timeout
+    delay(500);
+    Serial.print(".");
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nINFO: WiFi reconnected successfully");
+    Serial.print("IP: ");
+    Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nERR: WiFi reconnect timeout");
+  }
+}
+
+// HTTP POST
+void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, float windKmh) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("ERR: WiFi connection failed");
+    for(int i = 0; i < 3; i++) {
+      digitalWrite(GREEN_LED, HIGH);
+      delay(250);
+      digitalWrite(GREEN_LED, LOW);
+      delay(250);    
+    }
+    return;
+  }
+
+  WiFiClient client;
+  Serial.print("INFO: Connecting to ");
+  Serial.print(host);
+  Serial.print(":");
+  Serial.println(port);
+  if (!client.connect(host, port)) {
+    Serial.println("ERR: Server connection failed");
+    for(int i = 0; i < 3; i++) {
+      digitalWrite(GREEN_LED, HIGH);
+      delay(250);
+      digitalWrite(GREEN_LED, LOW);
+      delay(250);    
+    }
+    return;
+  }
+
+  char payload[512];
+  snprintf(payload, sizeof(payload),
+           "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.2f,\"pressure\":%.2f,\"pulses_per_min\":%d,\"wind_kmh\":%.2f,\"ts\":%lu}",
+           pm25, pm10, temp, pres, pulsesPerMin, windKmh, millis());
+
+  int len = snprintf(httpBuffer, sizeof(httpBuffer),
+                     "POST %s HTTP/1.1\r\n"
+                     "Host: %s\r\n"
+                     "Content-Type: application/json\r\n"
+                     "Content-Length: %d\r\n"
+                     "\r\n"
+                     "%s",
+                     path, host, strlen(payload), payload);
+
+  client.write((uint8_t*)httpBuffer, len);
+
+  unsigned long timeout = millis();
+  bool gotHTTP200 = false;
+
+  // increased timeout to 5 seconds
+  while (millis() - timeout < 5000) {
+    if (client.available()) {
+      String line = client.readStringUntil('\n');
+      if (line.startsWith("HTTP/1.1 200") || line.startsWith("HTTP/1.0 200")) {
+        gotHTTP200 = true;
+      }
+    }
+  }
+
+  client.stop();
+
+  if (gotHTTP200) {
+    Serial.println("INFO: Data sent successfully (HTTP 200)");
+    digitalWrite(GREEN_LED, HIGH);
+    delay(750);
+    digitalWrite(GREEN_LED, LOW);
+  } else {
+    Serial.println("ERR: HTTP Error!");
+    for(int i = 0; i < 3; i++) {
+      digitalWrite(GREEN_LED, HIGH);
+      delay(250);
+      digitalWrite(GREEN_LED, LOW);
+      delay(250);    
+    }
+  }
 }
 
 // SETUP
@@ -266,22 +270,30 @@ void setup() {
   Serial.println("INFO: Transoptical sensor initiated - windspeed");
   delay(1000);
 
+  // PMS5003 (AQ)
   pms.begin(9600, SERIAL_8N1, rxPin);
   Serial.println("INFO: PMS5003 initialized");
   delay(1000);
 
+  // BMP 280 temp/press sensor
   Wire.begin(sdaPin, sclPin);
   if (!bmp.begin(0x76)) Serial.println("ERR: Temp/pressure sensor no signal");
   else Serial.println("INFO: BMP280 Temp/pressure sensor initiated");
 
-  Serial.print("INFO: Connecting WiFi");
+  // WIRELESS CONNECTION SETUP
   WiFi.begin(ssid, password);
+  WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
+  Serial.println("INFO: Wifi initialized");
+  delay(3000);
+  Serial.print("INFO: Connecting to ");
+  Serial.print(ssid);
   unsigned long start = millis();
   while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
     Serial.print(".");
     delay(500);
   }
-  if (WiFi.status() == WL_CONNECTED) Serial.println("\nWiFi connected");
+  if (WiFi.status() == WL_CONNECTED) Serial.println("\nINFO: WiFi connected");
   else Serial.println("ERR: WiFi timeout");
   delay(2000);
 
@@ -328,7 +340,7 @@ void loop() {
 
   // 4. Check WiFi and reconnect if needed
   if (WiFi.status() != WL_CONNECTED) {
-    WiFiConnect();
+    WiFiReconnect();
   }
 
   // 5. Send data every 10 seconds
