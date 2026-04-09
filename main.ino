@@ -2,8 +2,9 @@
 #include <WiFi.h>
 #include <Wire.h>
 #include <Adafruit_BMP280.h>
+#include <Adafruit_AHTX0.h>
 
-// Network creds
+// Network credentials
 const char* ssid     = "";
 const char* password = "";
 const char* host     = "";
@@ -14,10 +15,13 @@ const char* path     = "/api/sensors";
 HardwareSerial pms(1);
 const int rxPin = 20;  // PMS TX -> ESP RX
 
-// BMP280 temperature and pressure sensor
+// I2C sensors (BMP280 + AHT20)
 Adafruit_BMP280 bmp;
+Adafruit_AHTX0 aht;
 const int sdaPin = 6;
 const int sclPin = 7;
+bool bmp_ok = false;
+bool aht_ok = false;
 
 // transmit LED
 const int GREEN_LED = 2;
@@ -32,15 +36,16 @@ float windKmh = 0.0;
 unsigned long lastWindCalc = 0;
 int pulsesPerMin = 0;  
 
-// data variables
+// data variables (keep last good values)
 int pm25 = 0, pm10 = 0;
-float temperature = 0.0f, pressure = 0.0f;
+float temperature = 0.0f;
+float pressure = 0.0f;
+float humidity = 0.0f;
 bool sensorSeen = false;
 unsigned long lastSend = 0;
 unsigned long lastValid = 0;
-char httpBuffer[512];
 
-// non-blocking sensor read timer
+// non‑blocking sensor read timer
 unsigned long lastSensorRead = 0;
 const unsigned long SENSOR_READ_INTERVAL = 2000;
 
@@ -48,7 +53,9 @@ const unsigned long SENSOR_READ_INTERVAL = 2000;
 unsigned long lastAnySensorOk = 0;
 bool sensorsNeedReinit = false;
 
-// interrupt routine for the ir transoptor
+// ------------------------------------------------------------------
+// Interrupt for wind sensor
+// ------------------------------------------------------------------
 void IRAM_ATTR irISR() {
   unsigned long now = micros();
   if (now - lastIrTime > DEBOUNCE_US) {
@@ -57,7 +64,9 @@ void IRAM_ATTR irISR() {
   }
 }
 
-// wind speed calculation
+// ------------------------------------------------------------------
+// Wind speed calculation
+// ------------------------------------------------------------------
 void updatePulsesPerMin() {
   unsigned long now = millis();
   unsigned long dt = now - lastWindCalc;
@@ -71,8 +80,7 @@ void updatePulsesPerMin() {
     Serial.print(irPulseCount);
     Serial.print(" -> ");
     Serial.print(pulsesPerMin);
-    Serial.print(" pulses/min ");
-    Serial.print("(~");
+    Serial.print(" pulses/min (~");
     Serial.print(windKmh);
     Serial.println(" kmh)");
     
@@ -81,7 +89,9 @@ void updatePulsesPerMin() {
   }
 }
 
-// PMS5003 data read
+// ------------------------------------------------------------------
+// PMS5003 reader (unchanged, works)
+// ------------------------------------------------------------------
 bool readPMS() {
   while (pms.available()) {
     if (pms.peek() == 0x42) break;
@@ -105,112 +115,149 @@ bool readPMS() {
 
   Serial.print("DATA: Air quality - PM2.5: "); Serial.print(pm25);
   Serial.print(", PM10 : "); Serial.println(pm10);
-
   return true;
 }
 
-// BMP280 READ
-bool readBMP() {
-  temperature = bmp.readTemperature();
-  pressure = bmp.readPressure() / 100.0F;
+// ------------------------------------------------------------------
+// Read BMP280 (temperature & pressure) + AHT20 (humidity)
+// ------------------------------------------------------------------
+bool readEnvironment() {
+  bool any_success = false;
 
-  if (isnan(temperature) || isnan(pressure)) return false;
+  // ----- BMP280 -----
+  if (bmp_ok) {
+    float t = bmp.readTemperature();
+    float p = bmp.readPressure() / 100.0F;
+    if (!isnan(t) && !isnan(p)) {
+      temperature = t;
+      pressure = p;
+      any_success = true;
+      Serial.print("DATA: BMP280 - Temp: "); Serial.print(temperature);
+      Serial.print(" °C, Pressure: "); Serial.print(pressure); Serial.println(" hPa");
+    } else {
+      Serial.println("WARN: BMP280 read failed (invalid values)");
+    }
+  } else {
+    Serial.println("WARN: BMP280 not initialised, skipping read");
+  }
 
-  Serial.print("DATA: BMP280 - Temp: "); Serial.print(temperature);
-  Serial.print(", Pressure: "); Serial.println(pressure);
+  // ----- AHT20 -----
+  if (aht_ok) {
+    sensors_event_t humidity_event, temp_event;
+    if (aht.getEvent(&humidity_event, &temp_event)) {
+      humidity = humidity_event.relative_humidity;
+      // optionally use temp_event.temperature if BMP280 is absent
+      any_success = true;
+      Serial.print("DATA: AHT20 - Humidity: "); Serial.print(humidity); Serial.println(" %");
+    } else {
+      Serial.println("WARN: AHT20 read failed");
+    }
+  } else {
+    Serial.println("WARN: AHT20 not initialised, skipping read");
+  }
 
-  return true;
+  return any_success;
 }
 
-// SENSOR REINIT
+// ------------------------------------------------------------------
+// Re‑initialise all sensors (I2C + PMS)
+// ------------------------------------------------------------------
 void reinitSensors() {
-  Serial.println("REINIT: Restating sensors.");
-  // Reinit I2C
+  Serial.println("REINIT: Restarting sensors.");
+  
+  // Reset I2C
   Wire.end();
   delay(100);
   Wire.begin(sdaPin, sclPin);
-  if (!bmp.begin(0x76)) {
-    Serial.println("REINIT: BMP280 reinit failed");
+  Wire.setClock(100000);  // safe speed
+  
+  // Re‑init BMP280 (try both addresses)
+  bmp_ok = false;
+  if (bmp.begin(0x76)) {
+    bmp_ok = true;
+    Serial.println("REINIT: BMP280 found at 0x76");
+  } else if (bmp.begin(0x77)) {
+    bmp_ok = true;
+    Serial.println("REINIT: BMP280 found at 0x77");
   } else {
-    Serial.println("REINIT: BMP280 reinit OK");
+    Serial.println("REINIT: BMP280 not found");
   }
-  // Reinit UART for PMS
+  
+  // Re‑init AHT20
+  aht_ok = aht.begin();
+  if (aht_ok) Serial.println("REINIT: AHT20 OK");
+  else Serial.println("REINIT: AHT20 not found");
+  
+  // Re‑init PMS UART
   pms.end();
   delay(100);
   pms.begin(9600, SERIAL_8N1, rxPin);
   Serial.println("REINIT: PMS5003 reinit attempt");
+  
   sensorsNeedReinit = false;
 }
+
+// ------------------------------------------------------------------
+// WiFi reconnect with full reset
+// ------------------------------------------------------------------
 void WiFiReconnect() {
-  if (WiFi.status() == WL_CONNECTED) {
-    return;
-  }
+  if (WiFi.status() == WL_CONNECTED) return;
 
   Serial.println("WIFI: Connection lost, attempting full reconnect...");
-
-  // Full WiFi stack reset - this is the key fix for the "cannot set config" error
-  WiFi.disconnect(true, true);   // disconnect + erase old config
+  WiFi.disconnect(true, true);
   delay(100);
-
-  WiFi.mode(WIFI_OFF);           // completely power down the radio
+  WiFi.mode(WIFI_OFF);
   delay(200);
-
-  WiFi.mode(WIFI_STA);           // restart in station mode
+  WiFi.mode(WIFI_STA);
   delay(100);
-
   WiFi.begin(ssid, password);
-  delay(5000);
-  Serial.print("WIFI: Connecting to ");
-  Serial.print(ssid);
+  
   unsigned long start = millis();
-  while (WiFi.status() != WL_CONNECTED && millis() - start < 25000) {  // 25s timeout
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 25000) {
     delay(500);
     Serial.print(".");
   }
-
   if (WiFi.status() == WL_CONNECTED) {
-    Serial.println("\nINFO: WiFi reconnected successfully");
-    Serial.print("IP: ");
-    Serial.println(WiFi.localIP());
+    Serial.println("\nINFO: WiFi reconnected");
+    Serial.print("IP: "); Serial.println(WiFi.localIP());
   } else {
     Serial.println("\nERR: WiFi reconnect timeout");
   }
 }
 
-// HTTP POST
-void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, float windKmh) {
+// ------------------------------------------------------------------
+// HTTP POST (now includes humidity)
+// ------------------------------------------------------------------
+void sendData(int pm25, int pm10, float temp, float pres, float hum, int pulses, float wind) {
   if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("ERR: WiFi connection failed");
+    Serial.println("ERR: WiFi not connected");
     for(int i = 0; i < 3; i++) {
       digitalWrite(GREEN_LED, HIGH);
       delay(250);
       digitalWrite(GREEN_LED, LOW);
-      delay(250);    
+      delay(250);
     }
     return;
   }
 
   WiFiClient client;
-  Serial.print("INFO: Connecting to ");
-  Serial.print(host);
-  Serial.print(":");
-  Serial.println(port);
   if (!client.connect(host, port)) {
     Serial.println("ERR: Server connection failed");
     for(int i = 0; i < 3; i++) {
       digitalWrite(GREEN_LED, HIGH);
       delay(250);
       digitalWrite(GREEN_LED, LOW);
-      delay(250);    
+      delay(250);
     }
     return;
   }
 
   char payload[512];
   snprintf(payload, sizeof(payload),
-           "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.2f,\"pressure\":%.2f,\"pulses_per_min\":%d,\"wind_kmh\":%.2f,\"ts\":%lu}",
-           pm25, pm10, temp, pres, pulsesPerMin, windKmh, millis());
+           "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.2f,\"pressure\":%.2f,\"humidity\":%.2f,\"pulses_per_min\":%d,\"wind_kmh\":%.2f,\"ts\":%lu}",
+           pm25, pm10, temp, pres, hum, pulses, wind, millis());
 
+  char httpBuffer[512];
   int len = snprintf(httpBuffer, sizeof(httpBuffer),
                      "POST %s HTTP/1.1\r\n"
                      "Host: %s\r\n"
@@ -224,8 +271,6 @@ void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, floa
 
   unsigned long timeout = millis();
   bool gotHTTP200 = false;
-
-  // increased timeout to 5 seconds
   while (millis() - timeout < 5000) {
     if (client.available()) {
       String line = client.readStringUntil('\n');
@@ -234,11 +279,10 @@ void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, floa
       }
     }
   }
-
   client.stop();
 
   if (gotHTTP200) {
-    Serial.println("INFO: Data sent successfully (HTTP 200)");
+    Serial.println("INFO: Data sent successfully");
     digitalWrite(GREEN_LED, HIGH);
     delay(750);
     digitalWrite(GREEN_LED, LOW);
@@ -248,44 +292,55 @@ void sendData(int pm25, int pm10, float temp, float pres, int pulsesPerMin, floa
       digitalWrite(GREEN_LED, HIGH);
       delay(250);
       digitalWrite(GREEN_LED, LOW);
-      delay(250);    
+      delay(250);
     }
   }
 }
 
+// ------------------------------------------------------------------
 // SETUP
+// ------------------------------------------------------------------
 void setup() {
   Serial.begin(115200);
   delay(2000);
 
   pinMode(GREEN_LED, OUTPUT);
   digitalWrite(GREEN_LED, LOW);
-
   Serial.println("INFO: Booting weather station");
 
-  // IR sensor with debounce
+  // Wind sensor interrupt
   pinMode(IR_PIN, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(IR_PIN), irISR, FALLING);
   lastWindCalc = millis();
-  Serial.println("INFO: Transoptical sensor initiated - windspeed");
-  delay(1000);
+  Serial.println("INFO: Wind sensor ready");
 
-  // PMS5003 (AQ)
+  // PMS5003
   pms.begin(9600, SERIAL_8N1, rxPin);
-  Serial.println("INFO: PMS5003 initialized");
-  delay(1000);
+  Serial.println("INFO: PMS5003 initialised");
 
-  // BMP 280 temp/press sensor
+  // I2C sensors
   Wire.begin(sdaPin, sclPin);
-  if (!bmp.begin(0x76)) Serial.println("ERR: Temp/pressure sensor no signal");
-  else Serial.println("INFO: BMP280 Temp/pressure sensor initiated");
+  Wire.setClock(100000);
+  
+  // Try both BMP280 addresses
+  if (bmp.begin(0x76)) {
+    bmp_ok = true;
+    Serial.println("INFO: BMP280 found at 0x76");
+  } else if (bmp.begin(0x77)) {
+    bmp_ok = true;
+    Serial.println("INFO: BMP280 found at 0x77");
+  } else {
+    Serial.println("ERR: BMP280 not detected");
+  }
+  
+  aht_ok = aht.begin();
+  if (aht_ok) Serial.println("INFO: AHT20 found");
+  else Serial.println("ERR: AHT20 not detected");
 
-  // WIRELESS CONNECTION SETUP
+  // WiFi
   WiFi.begin(ssid, password);
   WiFi.mode(WIFI_STA);
   WiFi.setTxPower(WIFI_POWER_8_5dBm);
-  Serial.println("INFO: Wifi initialized");
-  delay(3000);
   Serial.print("INFO: Connecting to ");
   Serial.print(ssid);
   unsigned long start = millis();
@@ -293,62 +348,65 @@ void setup() {
     Serial.print(".");
     delay(500);
   }
-  if (WiFi.status() == WL_CONNECTED) Serial.println("\nINFO: WiFi connected");
-  else Serial.println("ERR: WiFi timeout");
-  delay(2000);
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nINFO: WiFi connected");
+    Serial.print("IP: "); Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nERR: WiFi timeout");
+  }
 
   lastValid = millis();
   lastAnySensorOk = millis();
   lastSensorRead = millis();
 }
 
+// ------------------------------------------------------------------
 // LOOP
+// ------------------------------------------------------------------
 void loop() {
-  // 1. Update wind speed (always, non-blocking)
   updatePulsesPerMin();
 
-  // 2. Read sensors every SENSOR_READ_INTERVAL ms (non-blocking)
+  // Read sensors every 2 seconds
   if (millis() - lastSensorRead >= SENSOR_READ_INTERVAL) {
     lastSensorRead = millis();
 
     bool pms_ok = readPMS();
-    bool bmp_ok = readBMP();
+    bool env_ok = readEnvironment();  // BMP + AHT
 
-    if (pms_ok || bmp_ok) {
+    if (pms_ok || env_ok) {
       sensorSeen = true;
       lastValid = millis();
       lastAnySensorOk = millis();
-      sensorsNeedReinit = false;  // at least one sensor works
+      sensorsNeedReinit = false;
     } else {
       if (millis() - lastValid > 30000) {
         sensorSeen = false;
-        Serial.println("ERR: No sensor data detected.");
+        Serial.println("ERR: No sensor data for 30s");
       }
-      // If no sensor data for 60 seconds, try to reinit
       if (millis() - lastAnySensorOk > 60000 && !sensorsNeedReinit) {
         sensorsNeedReinit = true;
-        Serial.println("ERR: Both sensors failed for 60s, will reinit");
+        Serial.println("ERR: 60s with no data, will reinit sensors");
       }
     }
   }
 
-  // 3. Reinit sensors if needed (only once, then cleared on success)
+  // Reinit if needed
   if (sensorsNeedReinit) {
     reinitSensors();
     delay(500);
   }
 
-  // 4. Check WiFi and reconnect if needed
+  // WiFi recovery
   if (WiFi.status() != WL_CONNECTED) {
     WiFiReconnect();
   }
 
-  // 5. Send data every 10 seconds
+  // Send data every 10 seconds
   if (millis() - lastSend >= 10000) {
     if (sensorSeen) {
-      sendData(pm25, pm10, temperature, pressure, pulsesPerMin, windKmh);
+      sendData(pm25, pm10, temperature, pressure, humidity, pulsesPerMin, windKmh);
     } else {
-      sendData(0, 0, 0.0, 0.0, 0, 0.0);
+      sendData(0, 0, 0.0, 0.0, 0.0, 0, 0.0);
     }
     lastSend = millis();
   }
