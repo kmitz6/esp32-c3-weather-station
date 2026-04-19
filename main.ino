@@ -19,12 +19,12 @@ const char* path     = "/api/sensors";
 // These values are added to the raw aggregated values
 // before sending to the server.
 // Example: if temperature reads 4°C too high, set TEMP_CALIB = -4.0
-float TEMP_CALIB     = -4.0;   // subtract 4°C
-float PRESS_CALIB    = 15.0;   // add 15 hPa
-float HUM_CALIB      = 0.0;    // no change
-float WIND_CALIB     = 0.0;    // no change
-int   PM25_CALIB     = 0;      // no change
-int   PM10_CALIB     = 0;      // no change
+float TEMP_CALIB     = -4.0;   // add fixed value
+float PRESS_CALIB    = 15.0;   // add fixed valye
+float HUM_CALIB      = 0.0;    // add fixed value
+float WIND_CALIB     = 0.0;    // multiply
+float PM25_CALIB     = 0.0;      // multiply
+float PM10_CALIB     = 0.0;      // multiply
 // ============================================================
 
 // PMS5003
@@ -289,9 +289,9 @@ void sendData(float rawAvgTemp, float rawAvgPress, float rawAvgHum,
   float calibTemp = rawAvgTemp + TEMP_CALIB;
   float calibPress = rawAvgPress + PRESS_CALIB;
   float calibHum = rawAvgHum + HUM_CALIB;
-  float calibWind = rawMaxWind + WIND_CALIB;
-  int calibPM25 = rawMaxPM25 + PM25_CALIB;
-  int calibPM10 = rawMaxPM10 + PM10_CALIB;
+  float calibWind = rawMaxWind * WIND_CALIB;
+  int calibPM25 = rawMaxPM25 * PM25_CALIB;
+  int calibPM10 = rawMaxPM10 * PM10_CALIB;
 
   // Ensure no negative values for PM (optional)
   if (calibPM25 < 0) calibPM25 = 0;
