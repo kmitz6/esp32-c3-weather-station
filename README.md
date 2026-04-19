@@ -1,5 +1,9 @@
 # ESP32 Weather Station with PMS5003, BMP280, AHT20, and Anemometer
 
+3D model available @ cults:
+
+
+
 This project implements a weather data logger for an ESP32 board. It reads data from:
 
 - **PMS5003** laser particle counter (PM2.5, PM10)
