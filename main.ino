@@ -4,28 +4,20 @@
 #include <Adafruit_BMP280.h>
 #include <Adafruit_AHTX0.h>
 
-// ============================================================
 // Network credentials
-// ============================================================
 const char* ssid     = "";
 const char* password = "";
 const char* host     = "";
 const int   port     = 5000;
 const char* path     = "/api/sensors";
 
-// ============================================================
-// CALIBRATION OFFSETS (additive corrections)
-// ============================================================
-// These values are added to the raw aggregated values
-// before sending to the server.
-// Example: if temperature reads 4°C too high, set TEMP_CALIB = -4.0
+// CALIBRATION OFFSETS
 float TEMP_CALIB     = -4.0;   // add fixed value
 float PRESS_CALIB    = 15.0;   // add fixed valye
 float HUM_CALIB      = 0.0;    // add fixed value
 float WIND_CALIB     = 1.0;    // multiply
-float PM25_CALIB     = 1.0;      // multiply
-float PM10_CALIB     = 1.0;      // multiply
-// ============================================================
+float PM25_CALIB     = 1.0;    // multiply
+float PM10_CALIB     = 1.0;    // multiply
 
 // PMS5003
 HardwareSerial pms(1);
@@ -74,16 +66,14 @@ bool sensorSeen = false;
 unsigned long lastSend = 0;
 unsigned long lastValid = 0;
 unsigned long lastSensorRead = 0;
-const unsigned long SENSOR_READ_INTERVAL = 2000;  // 2 seconds
-const unsigned long SEND_INTERVAL = 10000;        // 10 seconds
+const unsigned long SENSOR_READ_INTERVAL = 3000;  // 3 seconds
+const unsigned long SEND_INTERVAL = 30000;        // 30 seconds
 
 // Recovery
 unsigned long lastAnySensorOk = 0;
 bool sensorsNeedReinit = false;
 
-// ------------------------------------------------------------------
 // Interrupt for wind sensor
-// ------------------------------------------------------------------
 void IRAM_ATTR irISR() {
   unsigned long now = micros();
   if (now - lastIrTime > DEBOUNCE_US) {
@@ -92,9 +82,7 @@ void IRAM_ATTR irISR() {
   }
 }
 
-// ------------------------------------------------------------------
-// Wind speed calculation (raw)
-// ------------------------------------------------------------------
+// Wind speed calculation
 void updatePulsesPerMin() {
   unsigned long now = millis();
   unsigned long dt = now - lastWindCalc;
@@ -117,9 +105,7 @@ void updatePulsesPerMin() {
   }
 }
 
-// ------------------------------------------------------------------
-// PMS5003 reader (raw)
-// ------------------------------------------------------------------
+
 bool readPMS() {
   while (pms.available()) {
     if (pms.peek() == 0x42) break;
@@ -141,9 +127,7 @@ bool readPMS() {
   return true;
 }
 
-// ------------------------------------------------------------------
-// Read environment (raw, without calibration)
-// ------------------------------------------------------------------
+
 bool readEnvironment() {
   bool any_success = false;
   if (bmp_ok) {
@@ -172,9 +156,8 @@ bool readEnvironment() {
   return any_success;
 }
 
-// ------------------------------------------------------------------
-// Store raw readings into rolling buffer
-// ------------------------------------------------------------------
+
+// Store readings into rolling buffer
 void storeToBuffer() {
   tempBuffer[bufferIndex] = temperature;
   pressBuffer[bufferIndex] = pressure;
@@ -187,9 +170,8 @@ void storeToBuffer() {
   if (bufferCount < BUFFER_SIZE) bufferCount++;
 }
 
-// ------------------------------------------------------------------
-// Compute aggregates from raw buffer
-// ------------------------------------------------------------------
+
+// values sent to the server are calculated based on last 15 (by default) readings
 void computeRawAggregates(float &avgTemp, float &avgPress, float &avgHum,
                           float &maxWind, int &maxPM25, int &maxPM10) {
   if (bufferCount == 0) {
@@ -217,9 +199,7 @@ void computeRawAggregates(float &avgTemp, float &avgPress, float &avgHum,
   maxPM10 = maxP10;
 }
 
-// ------------------------------------------------------------------
-// Print raw aggregates to serial
-// ------------------------------------------------------------------
+// Print to serial
 void printAggregates() {
   float avgT, avgP, avgH, maxW;
   int maxP25, maxP10;
@@ -234,9 +214,7 @@ void printAggregates() {
   Serial.println("----------------------------------------");
 }
 
-// ------------------------------------------------------------------
-// Reinit sensors
-// ------------------------------------------------------------------
+// Reinitiates sensor in case of issues with sensor reading
 void reinitSensors() {
   Serial.println("REINIT: Restarting sensors.");
   Wire.end(); delay(100);
@@ -254,9 +232,7 @@ void reinitSensors() {
   sensorsNeedReinit = false;
 }
 
-// ------------------------------------------------------------------
-// WiFi reconnect
-// ------------------------------------------------------------------
+// WiFi reconnection function - workaround for disconnection issue not triggering wificonnect
 void WiFiReconnect() {
   if (WiFi.status() == WL_CONNECTED) return;
   Serial.println("WIFI: Reconnecting...");
@@ -280,12 +256,10 @@ void WiFiReconnect() {
   }
 }
 
-// ------------------------------------------------------------------
+
 // Send data to server (applies calibration offsets to the aggregates)
-// ------------------------------------------------------------------
 void sendData(float rawAvgTemp, float rawAvgPress, float rawAvgHum,
               float rawMaxWind, int rawMaxPM25, int rawMaxPM10) {
-  // Apply calibration offsets
   float calibTemp = rawAvgTemp + TEMP_CALIB;
   float calibPress = rawAvgPress + PRESS_CALIB;
   float calibHum = rawAvgHum + HUM_CALIB;
@@ -293,12 +267,7 @@ void sendData(float rawAvgTemp, float rawAvgPress, float rawAvgHum,
   int calibPM25 = rawMaxPM25 * PM25_CALIB;
   int calibPM10 = rawMaxPM10 * PM10_CALIB;
 
-  // Ensure no negative values for PM (optional)
-  if (calibPM25 < 0) calibPM25 = 0;
-  if (calibPM10 < 0) calibPM10 = 0;
-  if (calibWind < 0) calibWind = 0;
-
-  Serial.println("--- Sending to server (calibrated) ---");
+  Serial.println("--- Sending to server ---");
   Serial.print("Calibrated Temp: "); Serial.print(calibTemp);
   Serial.print(" °C, Press: "); Serial.print(calibPress);
   Serial.print(" hPa, Hum: "); Serial.print(calibHum);
@@ -355,9 +324,9 @@ void sendData(float rawAvgTemp, float rawAvgPress, float rawAvgHum,
   }
 }
 
-// ------------------------------------------------------------------
+// =====
 // SETUP
-// ------------------------------------------------------------------
+// =====
 void setup() {
   Serial.begin(115200);
   delay(2000);
@@ -401,13 +370,13 @@ void setup() {
   lastSend = millis();
 }
 
-// ------------------------------------------------------------------
+// ====
 // LOOP
-// ------------------------------------------------------------------
+// ====
 void loop() {
   updatePulsesPerMin();
 
-  // Read sensors every 2 seconds
+  // Read sensors every SENSOR_READ_INTERVAL seconds
   if (millis() - lastSensorRead >= SENSOR_READ_INTERVAL) {
     lastSensorRead = millis();
     bool pms_ok = readPMS();
@@ -417,8 +386,8 @@ void loop() {
       lastValid = millis();
       lastAnySensorOk = millis();
       sensorsNeedReinit = false;
-      storeToBuffer();                // store raw readings
-      printAggregates();              // print raw aggregates
+      storeToBuffer();
+      printAggregates();
     } else {
       if (millis() - lastValid > 30000) sensorSeen = false;
       if (millis() - lastAnySensorOk > 60000 && !sensorsNeedReinit) {
@@ -434,7 +403,7 @@ void loop() {
   }
   if (WiFi.status() != WL_CONNECTED) WiFiReconnect();
 
-  // Send data every 10 seconds using raw aggregates + calibration
+  // Send data every SEND_INTERVAL seconds using raw aggregates + calibration values
   if (millis() - lastSend >= SEND_INTERVAL) {
     if (bufferCount > 0) {
       float avgTemp, avgPress, avgHum, maxWind;
