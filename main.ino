@@ -1,154 +1,415 @@
-#include <Wire.h>
+#include <HardwareSerial.h>
 #include <WiFi.h>
-#include <HTTPClient.h>
-#include <ArduinoJson.h>
-#include "ScioSense_ENS160.h"
-#include "Adafruit_AHTX0.h"
+#include <Wire.h>
+#include <Adafruit_BMP280.h>
+#include <Adafruit_AHTX0.h>
 
-// --- I2cInterface class ---
-class I2cInterface {
-public:
-  void begin(TwoWire &wire, uint8_t address) {
-    _wire = &wire;
-    _address = address;
-  }
+// Network credentials
+const char* ssid     = "";
+const char* password = "";
+const char* host     = "";
+const int   port     = 5000;
+const char* path     = "/api/sensors";
 
-  bool writeRegister(uint8_t reg, uint8_t *data, size_t len) {
-    _wire->beginTransmission(_address);
-    _wire->write(reg);
-    for (size_t i = 0; i < len; i++) _wire->write(data[i]);
-    return (_wire->endTransmission() == 0);
-  }
+// PMS5003
+HardwareSerial pms(1);
+const int rxPin = 20;
 
-  bool readRegister(uint8_t reg, uint8_t *data, size_t len) {
-    _wire->beginTransmission(_address);
-    _wire->write(reg);
-    if (_wire->endTransmission(false) != 0) return false;
-    if (_wire->requestFrom(_address, len) != len) return false;
-    for (size_t i = 0; i < len; i++) data[i] = _wire->read();
-    return true;
-  }
-
-private:
-  TwoWire *_wire;
-  uint8_t _address;
-};
-
-
-// --- Configuration ---
-const char* WIFI_SSID     = "YourWiFiSSID";
-const char* WIFI_PASSWORD = "YourWiFiPassword";
-const char* SERVER_HOST   = "192.168.1.100";   // Your Flask server IP
-const int   SERVER_PORT   = 5000;
-const long READ_INTERVAL = 10000;
-
-#define I2C_SDA 8
-#define I2C_SCL 9
-
-// --- Globals ---
-I2cInterface i2c;
-ScioSense_ENS160 ens160;
+// I2C sensors
+Adafruit_BMP280 bmp;
 Adafruit_AHTX0 aht;
-unsigned long lastReadTime = 0;
+const int sdaPin = 6;
+const int sclPin = 7;
+bool bmp_ok = false;
+bool aht_ok = false;
 
-void setup() {
-  Serial.begin(115200);
-  delay(1000);
-  Serial.println("\nStarting ENS160 + AHT21 reader...");
+// LED
+const int GREEN_LED = 2;
 
-  // Connect to Wi-Fi
-  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
-  Serial.print("Connecting to Wi-Fi");
-  while (WiFi.status() != WL_CONNECTED) {
+// Anemometer
+const int IR_PIN = 8;
+volatile unsigned long irPulseCount = 0;
+volatile unsigned long lastIrTime = 0;
+const unsigned long DEBOUNCE_US = 5000;
+float windKmh = 0.0;
+unsigned long lastWindCalc = 0;
+int pulsesPerMin = 0;
+
+// Rolling buffer for last 15 readings
+const int BUFFER_SIZE = 15;
+float tempBuffer[BUFFER_SIZE];
+float pressBuffer[BUFFER_SIZE];
+float humBuffer[BUFFER_SIZE];
+float windBuffer[BUFFER_SIZE];
+int pm25Buffer[BUFFER_SIZE];
+int pm10Buffer[BUFFER_SIZE];
+
+int bufferIndex = 0;
+int bufferCount = 0;   // number of stored readings (max BUFFER_SIZE)
+
+// Current instantaneous values
+int pm25 = 0, pm10 = 0;
+float temperature = 0.0f;
+float pressure = 0.0f;
+float humidity = 0.0f;
+bool sensorSeen = false;
+
+// Timing
+unsigned long lastSend = 0;
+unsigned long lastValid = 0;
+unsigned long lastSensorRead = 0;
+const unsigned long SENSOR_READ_INTERVAL = 2000;  // 2 seconds
+const unsigned long SEND_INTERVAL = 10000;        // 10 seconds
+
+// Recovery
+unsigned long lastAnySensorOk = 0;
+bool sensorsNeedReinit = false;
+
+// ------------------------------------------------------------------
+// Interrupt for wind sensor
+// ------------------------------------------------------------------
+void IRAM_ATTR irISR() {
+  unsigned long now = micros();
+  if (now - lastIrTime > DEBOUNCE_US) {
+    irPulseCount++;
+    lastIrTime = now;
+  }
+}
+
+// ------------------------------------------------------------------
+// Wind speed calculation
+// ------------------------------------------------------------------
+void updatePulsesPerMin() {
+  unsigned long now = millis();
+  unsigned long dt = now - lastWindCalc;
+  if (dt >= 3000) {
+    float pulsesPerSec = (float)irPulseCount / (dt / 1000.0);
+    pulsesPerMin = (int)(pulsesPerSec * 60.0);
+    windKmh = pulsesPerMin * 0.04;
+    Serial.print("DATA: Wind - pulses in last ");
+    Serial.print(dt);
+    Serial.print(" ms: ");
+    Serial.print(irPulseCount);
+    Serial.print(" -> ");
+    Serial.print(pulsesPerMin);
+    Serial.print(" pulses/min (~");
+    Serial.print(windKmh);
+    Serial.println(" kmh)");
+    
+    irPulseCount = 0;
+    lastWindCalc = now;
+  }
+}
+
+// ------------------------------------------------------------------
+// PMS5003 reader
+// ------------------------------------------------------------------
+bool readPMS() {
+  while (pms.available()) {
+    if (pms.peek() == 0x42) break;
+    pms.read();
+    delay(1);
+  }
+  if (pms.available() < 32) return false;
+  uint8_t buf[32];
+  if (pms.readBytes(buf, 32) != 32) return false;
+  if (buf[0] != 0x42 || buf[1] != 0x4D) return false;
+  uint16_t sum = 0;
+  for (int i = 0; i < 30; i++) sum += buf[i];
+  uint16_t chk = (buf[30] << 8) | buf[31];
+  if (sum != chk) return false;
+  pm25 = (buf[4] << 8) | buf[5];
+  pm10 = (buf[6] << 8) | buf[7];
+  Serial.print("DATA: Air quality - PM2.5: "); Serial.print(pm25);
+  Serial.print(", PM10: "); Serial.println(pm10);
+  return true;
+}
+
+// ------------------------------------------------------------------
+// Read environment (BMP280 + AHT20)
+// ------------------------------------------------------------------
+bool readEnvironment() {
+  bool any_success = false;
+  if (bmp_ok) {
+    float t = bmp.readTemperature();
+    float p = bmp.readPressure() / 100.0F;
+    if (!isnan(t) && !isnan(p)) {
+      temperature = t;
+      pressure = p;
+      any_success = true;
+      Serial.print("DATA: BMP280 - Temp: "); Serial.print(temperature);
+      Serial.print(" °C, Pressure: "); Serial.print(pressure); Serial.println(" hPa");
+    } else {
+      Serial.println("WARN: BMP280 read failed");
+    }
+  }
+  if (aht_ok) {
+    sensors_event_t humidity_event, temp_event;
+    if (aht.getEvent(&humidity_event, &temp_event)) {
+      humidity = humidity_event.relative_humidity;
+      any_success = true;
+      Serial.print("DATA: AHT20 - Humidity: "); Serial.print(humidity); Serial.println(" %");
+    } else {
+      Serial.println("WARN: AHT20 read failed");
+    }
+  }
+  return any_success;
+}
+
+// ------------------------------------------------------------------
+// Store current readings into rolling buffer
+// ------------------------------------------------------------------
+void storeToBuffer() {
+  tempBuffer[bufferIndex] = temperature;
+  pressBuffer[bufferIndex] = pressure;
+  humBuffer[bufferIndex] = humidity;
+  windBuffer[bufferIndex] = windKmh;
+  pm25Buffer[bufferIndex] = pm25;
+  pm10Buffer[bufferIndex] = pm10;
+  
+  bufferIndex = (bufferIndex + 1) % BUFFER_SIZE;
+  if (bufferCount < BUFFER_SIZE) bufferCount++;
+}
+
+// ------------------------------------------------------------------
+// Compute aggregates from current buffer
+// ------------------------------------------------------------------
+void computeAggregates(float &avgTemp, float &avgPress, float &avgHum,
+                       float &maxWind, int &maxPM25, int &maxPM10) {
+  if (bufferCount == 0) {
+    avgTemp = avgPress = avgHum = 0.0f;
+    maxWind = 0.0f;
+    maxPM25 = maxPM10 = 0;
+    return;
+  }
+  float sumTemp = 0, sumPress = 0, sumHum = 0;
+  float maxW = -1e6;
+  int maxP25 = -1, maxP10 = -1;
+  for (int i = 0; i < bufferCount; i++) {
+    sumTemp += tempBuffer[i];
+    sumPress += pressBuffer[i];
+    sumHum += humBuffer[i];
+    if (windBuffer[i] > maxW) maxW = windBuffer[i];
+    if (pm25Buffer[i] > maxP25) maxP25 = pm25Buffer[i];
+    if (pm10Buffer[i] > maxP10) maxP10 = pm10Buffer[i];
+  }
+  avgTemp = sumTemp / bufferCount;
+  avgPress = sumPress / bufferCount;
+  avgHum = sumHum / bufferCount;
+  maxWind = maxW;
+  maxPM25 = maxP25;
+  maxPM10 = maxP10;
+}
+
+// ------------------------------------------------------------------
+// Print current aggregates to serial
+// ------------------------------------------------------------------
+void printAggregates() {
+  float avgT, avgP, avgH, maxW;
+  int maxP25, maxP10;
+  computeAggregates(avgT, avgP, avgH, maxW, maxP25, maxP10);
+  Serial.println("--- Aggregates (last " + String(bufferCount) + " readings) ---");
+  Serial.print("Avg Temp: "); Serial.print(avgT); Serial.print(" °C, ");
+  Serial.print("Avg Press: "); Serial.print(avgP); Serial.print(" hPa, ");
+  Serial.print("Avg Hum: "); Serial.print(avgH); Serial.println(" %");
+  Serial.print("Max Wind: "); Serial.print(maxW); Serial.print(" km/h, ");
+  Serial.print("Max PM2.5: "); Serial.print(maxP25); Serial.print(", ");
+  Serial.print("Max PM10: "); Serial.println(maxP10);
+  Serial.println("----------------------------------------");
+}
+
+// ------------------------------------------------------------------
+// Reinit sensors (unchanged)
+// ------------------------------------------------------------------
+void reinitSensors() {
+  Serial.println("REINIT: Restarting sensors.");
+  Wire.end(); delay(100);
+  Wire.begin(sdaPin, sclPin);
+  Wire.setClock(100000);
+  bmp_ok = false;
+  if (bmp.begin(0x76)) bmp_ok = true;
+  else if (bmp.begin(0x77)) bmp_ok = true;
+  else Serial.println("REINIT: BMP280 not found");
+  aht_ok = aht.begin();
+  if (aht_ok) Serial.println("REINIT: AHT20 OK");
+  else Serial.println("REINIT: AHT20 not found");
+  pms.end(); delay(100);
+  pms.begin(9600, SERIAL_8N1, rxPin);
+  sensorsNeedReinit = false;
+}
+
+// ------------------------------------------------------------------
+// WiFi reconnect (unchanged)
+// ------------------------------------------------------------------
+void WiFiReconnect() {
+  if (WiFi.status() == WL_CONNECTED) return;
+  Serial.println("WIFI: Reconnecting...");
+  WiFi.disconnect(true, true);
+  delay(100);
+  WiFi.mode(WIFI_OFF);
+  delay(200);
+  WiFi.mode(WIFI_STA);
+  delay(100);
+  WiFi.begin(ssid, password);
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 25000) {
     delay(500);
     Serial.print(".");
   }
-  Serial.println("\nWi-Fi connected, IP: " + WiFi.localIP().toString());
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nINFO: WiFi reconnected");
+    Serial.print("IP: "); Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nERR: WiFi reconnect timeout");
+  }
+}
 
-  // Initialize I2C
-  Wire.begin(I2C_SDA, I2C_SCL);
-  Wire.setClock(100000);
-
-  // Initialize ENS160 (try 0x53 then 0x52)
-  i2c.begin(Wire, 0x53);
-  if (!ens160.begin(&i2c)) {
-    i2c.begin(Wire, 0x52);
-    if (!ens160.begin(&i2c)) {
-      Serial.println("ENS160 not found! Check wiring.");
-    } else {
-      Serial.println("ENS160 initialized at 0x52.");
-      ens160.startStandardMeasure();
+// ------------------------------------------------------------------
+// Send aggregated data to server
+// ------------------------------------------------------------------
+void sendData(float avgTemp, float avgPress, float avgHum,
+              float maxWind, int maxPM25, int maxPM10) {
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("ERR: WiFi not connected");
+    for(int i = 0; i < 3; i++) {
+      digitalWrite(GREEN_LED, HIGH); delay(250);
+      digitalWrite(GREEN_LED, LOW); delay(250);
     }
-  } else {
-    Serial.println("ENS160 initialized at 0x53.");
-    ens160.startStandardMeasure();
+    return;
   }
-
-  // Initialize AHT21
-  if (!aht.begin()) {
-    Serial.println("AHT21 not found! Check wiring.");
-  } else {
-    Serial.println("AHT21 initialized.");
+  WiFiClient client;
+  if (!client.connect(host, port)) {
+    Serial.println("ERR: Server connection failed");
+    for(int i = 0; i < 3; i++) {
+      digitalWrite(GREEN_LED, HIGH); delay(250);
+      digitalWrite(GREEN_LED, LOW); delay(250);
+    }
+    return;
   }
-}
-
-void sendToFlask(uint16_t co2, uint16_t tvoc, float temp, float hum) {
-  if (WiFi.status() != WL_CONNECTED) return;
-
-  HTTPClient http;
-  String url = "http://" + String(SERVER_HOST) + ":" + String(SERVER_PORT) + "/api/indoor_sensors";
-  http.begin(url);
-  http.addHeader("Content-Type", "application/json");
-
-  StaticJsonDocument<200> doc;
-  doc["co2"] = co2;
-  doc["tvoc"] = tvoc;
-  doc["temp_aht21"] = temp;
-  doc["hum_aht21"] = hum;
-  doc["temp_bmp280"] = 0.0;
-  doc["pressure_bmp280"] = 0.0;
-
-  String jsonString;
-  serializeJson(doc, jsonString);
-  int httpCode = http.POST(jsonString);
-  if (httpCode == 200) {
-    Serial.println("Data sent successfully.");
-  } else {
-    Serial.printf("HTTP POST failed, code: %d\n", httpCode);
-  }
-  http.end();
-}
-
-void loop() {
-  if (millis() - lastReadTime >= READ_INTERVAL) {
-    lastReadTime = millis();
-
-    // Read ENS160 (following original logic)
-    uint16_t eco2 = 0, tvoc = 0;
-    if (ens160.update() == ScioSense::ENS16x::Result::Ok) {
-      if (hasFlag(ens160.getDeviceStatus(), ScioSense::ENS16x::DeviceStatus::NewData)) {
-        tvoc = ens160.getTvoc();
-        eco2 = ens160.getEco2();
-        Serial.printf("ENS160: eCO₂=%d ppm, TVOC=%d ppb\n", eco2, tvoc);
-      } else {
-        Serial.println("ENS160: No new data.");
+  char payload[512];
+  snprintf(payload, sizeof(payload),
+           "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.1f,\"pressure\":%.1f,\"humidity\":%.1f,\"wind_kmh\":%.1f,\"ts\":%lu}",
+           maxPM25, maxPM10, avgTemp, avgPress, avgHum, maxWind, millis());
+  char httpBuffer[512];
+  int len = snprintf(httpBuffer, sizeof(httpBuffer),
+                     "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
+                     path, host, strlen(payload), payload);
+  client.write((uint8_t*)httpBuffer, len);
+  unsigned long timeout = millis();
+  bool gotHTTP200 = false;
+  while (millis() - timeout < 5000) {
+    if (client.available()) {
+      String line = client.readStringUntil('\n');
+      if (line.startsWith("HTTP/1.1 200") || line.startsWith("HTTP/1.0 200")) {
+        gotHTTP200 = true;
       }
-    } else {
-      Serial.println("ENS160 update failed.");
     }
-
-    // Read AHT21
-    float temperature = 0.0, humidity = 0.0;
-    sensors_event_t humidity_event, temp_event;
-    if (aht.getEvent(&humidity_event, &temp_event)) {
-      temperature = temp_event.temperature;
-      humidity = humidity_event.relative_humidity;
-      Serial.printf("AHT21: T=%.2f °C, H=%.1f %%\n", temperature, humidity);
-    } else {
-      Serial.println("AHT21 read failed.");
-    }
-
-    sendToFlask(eco2, tvoc, temperature, humidity);
   }
-  delay(100);
+  client.stop();
+  if (gotHTTP200) {
+    Serial.println("INFO: Data sent successfully");
+    digitalWrite(GREEN_LED, HIGH); delay(750); digitalWrite(GREEN_LED, LOW);
+  } else {
+    Serial.println("ERR: HTTP Error!");
+    for(int i = 0; i < 3; i++) {
+      digitalWrite(GREEN_LED, HIGH); delay(250);
+      digitalWrite(GREEN_LED, LOW); delay(250);
+    }
+  }
+}
+
+// ------------------------------------------------------------------
+// SETUP
+// ------------------------------------------------------------------
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+  pinMode(GREEN_LED, OUTPUT);
+  digitalWrite(GREEN_LED, LOW);
+  Serial.println("INFO: Booting weather station");
+
+  pinMode(IR_PIN, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(IR_PIN), irISR, FALLING);
+  lastWindCalc = millis();
+
+  pms.begin(9600, SERIAL_8N1, rxPin);
+  Wire.begin(sdaPin, sclPin);
+  Wire.setClock(100000);
+  if (bmp.begin(0x76)) bmp_ok = true;
+  else if (bmp.begin(0x77)) bmp_ok = true;
+  else Serial.println("ERR: BMP280 not detected");
+  aht_ok = aht.begin();
+  if (aht_ok) Serial.println("INFO: AHT20 found");
+  else Serial.println("ERR: AHT20 not detected");
+
+  WiFi.begin(ssid, password);
+  WiFi.mode(WIFI_STA);
+  WiFi.setTxPower(WIFI_POWER_8_5dBm);
+  Serial.print("INFO: Connecting to WiFi");
+  unsigned long start = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - start < 30000) {
+    Serial.print(".");
+    delay(500);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println("\nINFO: WiFi connected");
+    Serial.print("IP: "); Serial.println(WiFi.localIP());
+  } else {
+    Serial.println("\nERR: WiFi timeout");
+  }
+
+  lastValid = millis();
+  lastAnySensorOk = millis();
+  lastSensorRead = millis();
+  lastSend = millis();
+}
+
+// ------------------------------------------------------------------
+// LOOP
+// ------------------------------------------------------------------
+void loop() {
+  updatePulsesPerMin();
+
+  // Read sensors every 2 seconds
+  if (millis() - lastSensorRead >= SENSOR_READ_INTERVAL) {
+    lastSensorRead = millis();
+    bool pms_ok = readPMS();
+    bool env_ok = readEnvironment();
+    if (pms_ok || env_ok) {
+      sensorSeen = true;
+      lastValid = millis();
+      lastAnySensorOk = millis();
+      sensorsNeedReinit = false;
+      storeToBuffer();                // store into rolling buffer
+      printAggregates();              // print aggregates after each read
+    } else {
+      if (millis() - lastValid > 30000) sensorSeen = false;
+      if (millis() - lastAnySensorOk > 60000 && !sensorsNeedReinit) {
+        sensorsNeedReinit = true;
+        Serial.println("ERR: 60s with no data, reinit sensors");
+      }
+    }
+  }
+
+  if (sensorsNeedReinit) {
+    reinitSensors();
+    delay(500);
+  }
+  if (WiFi.status() != WL_CONNECTED) WiFiReconnect();
+
+  // Send data every 10 seconds using current buffer aggregates
+  if (millis() - lastSend >= SEND_INTERVAL) {
+    if (bufferCount > 0) {
+      float avgTemp, avgPress, avgHum, maxWind;
+      int maxPM25, maxPM10;
+      computeAggregates(avgTemp, avgPress, avgHum, maxWind, maxPM25, maxPM10);
+      Serial.println("--- Sending to server ---");
+      sendData(avgTemp, avgPress, avgHum, maxWind, maxPM25, maxPM10);
+    } else {
+      // No readings at all – send zeros
+      Serial.println("WARN: No readings in buffer, sending zeros.");
+      sendData(0.0, 0.0, 0.0, 0.0, 0, 0);
+    }
+    lastSend = millis();
+  }
 }
