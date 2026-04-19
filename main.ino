@@ -4,12 +4,28 @@
 #include <Adafruit_BMP280.h>
 #include <Adafruit_AHTX0.h>
 
+// ============================================================
 // Network credentials
+// ============================================================
 const char* ssid     = "";
 const char* password = "";
 const char* host     = "";
 const int   port     = 5000;
 const char* path     = "/api/sensors";
+
+// ============================================================
+// CALIBRATION OFFSETS (additive corrections)
+// ============================================================
+// These values are added to the raw aggregated values
+// before sending to the server.
+// Example: if temperature reads 4°C too high, set TEMP_CALIB = -4.0
+float TEMP_CALIB     = -4.0;   // subtract 4°C
+float PRESS_CALIB    = 15.0;   // add 15 hPa
+float HUM_CALIB      = 0.0;    // no change
+float WIND_CALIB     = 0.0;    // no change
+int   PM25_CALIB     = 0;      // no change
+int   PM10_CALIB     = 0;      // no change
+// ============================================================
 
 // PMS5003
 HardwareSerial pms(1);
@@ -45,9 +61,9 @@ int pm25Buffer[BUFFER_SIZE];
 int pm10Buffer[BUFFER_SIZE];
 
 int bufferIndex = 0;
-int bufferCount = 0;   // number of stored readings (max BUFFER_SIZE)
+int bufferCount = 0;
 
-// Current instantaneous values
+// Current raw instantaneous values
 int pm25 = 0, pm10 = 0;
 float temperature = 0.0f;
 float pressure = 0.0f;
@@ -77,7 +93,7 @@ void IRAM_ATTR irISR() {
 }
 
 // ------------------------------------------------------------------
-// Wind speed calculation
+// Wind speed calculation (raw)
 // ------------------------------------------------------------------
 void updatePulsesPerMin() {
   unsigned long now = millis();
@@ -86,7 +102,7 @@ void updatePulsesPerMin() {
     float pulsesPerSec = (float)irPulseCount / (dt / 1000.0);
     pulsesPerMin = (int)(pulsesPerSec * 60.0);
     windKmh = pulsesPerMin * 0.04;
-    Serial.print("DATA: Wind - pulses in last ");
+    Serial.print("RAW: Wind - pulses in last ");
     Serial.print(dt);
     Serial.print(" ms: ");
     Serial.print(irPulseCount);
@@ -102,7 +118,7 @@ void updatePulsesPerMin() {
 }
 
 // ------------------------------------------------------------------
-// PMS5003 reader
+// PMS5003 reader (raw)
 // ------------------------------------------------------------------
 bool readPMS() {
   while (pms.available()) {
@@ -120,13 +136,13 @@ bool readPMS() {
   if (sum != chk) return false;
   pm25 = (buf[4] << 8) | buf[5];
   pm10 = (buf[6] << 8) | buf[7];
-  Serial.print("DATA: Air quality - PM2.5: "); Serial.print(pm25);
+  Serial.print("RAW: Air quality - PM2.5: "); Serial.print(pm25);
   Serial.print(", PM10: "); Serial.println(pm10);
   return true;
 }
 
 // ------------------------------------------------------------------
-// Read environment (BMP280 + AHT20)
+// Read environment (raw, without calibration)
 // ------------------------------------------------------------------
 bool readEnvironment() {
   bool any_success = false;
@@ -137,7 +153,7 @@ bool readEnvironment() {
       temperature = t;
       pressure = p;
       any_success = true;
-      Serial.print("DATA: BMP280 - Temp: "); Serial.print(temperature);
+      Serial.print("RAW: BMP280 - Temp: "); Serial.print(temperature);
       Serial.print(" °C, Pressure: "); Serial.print(pressure); Serial.println(" hPa");
     } else {
       Serial.println("WARN: BMP280 read failed");
@@ -148,7 +164,7 @@ bool readEnvironment() {
     if (aht.getEvent(&humidity_event, &temp_event)) {
       humidity = humidity_event.relative_humidity;
       any_success = true;
-      Serial.print("DATA: AHT20 - Humidity: "); Serial.print(humidity); Serial.println(" %");
+      Serial.print("RAW: AHT20 - Humidity: "); Serial.print(humidity); Serial.println(" %");
     } else {
       Serial.println("WARN: AHT20 read failed");
     }
@@ -157,7 +173,7 @@ bool readEnvironment() {
 }
 
 // ------------------------------------------------------------------
-// Store current readings into rolling buffer
+// Store raw readings into rolling buffer
 // ------------------------------------------------------------------
 void storeToBuffer() {
   tempBuffer[bufferIndex] = temperature;
@@ -172,10 +188,10 @@ void storeToBuffer() {
 }
 
 // ------------------------------------------------------------------
-// Compute aggregates from current buffer
+// Compute aggregates from raw buffer
 // ------------------------------------------------------------------
-void computeAggregates(float &avgTemp, float &avgPress, float &avgHum,
-                       float &maxWind, int &maxPM25, int &maxPM10) {
+void computeRawAggregates(float &avgTemp, float &avgPress, float &avgHum,
+                          float &maxWind, int &maxPM25, int &maxPM10) {
   if (bufferCount == 0) {
     avgTemp = avgPress = avgHum = 0.0f;
     maxWind = 0.0f;
@@ -202,13 +218,13 @@ void computeAggregates(float &avgTemp, float &avgPress, float &avgHum,
 }
 
 // ------------------------------------------------------------------
-// Print current aggregates to serial
+// Print raw aggregates to serial
 // ------------------------------------------------------------------
 void printAggregates() {
   float avgT, avgP, avgH, maxW;
   int maxP25, maxP10;
-  computeAggregates(avgT, avgP, avgH, maxW, maxP25, maxP10);
-  Serial.println("--- Aggregates (last " + String(bufferCount) + " readings) ---");
+  computeRawAggregates(avgT, avgP, avgH, maxW, maxP25, maxP10);
+  Serial.println("--- Aggregates (raw, last " + String(bufferCount) + " readings) ---");
   Serial.print("Avg Temp: "); Serial.print(avgT); Serial.print(" °C, ");
   Serial.print("Avg Press: "); Serial.print(avgP); Serial.print(" hPa, ");
   Serial.print("Avg Hum: "); Serial.print(avgH); Serial.println(" %");
@@ -219,7 +235,7 @@ void printAggregates() {
 }
 
 // ------------------------------------------------------------------
-// Reinit sensors (unchanged)
+// Reinit sensors
 // ------------------------------------------------------------------
 void reinitSensors() {
   Serial.println("REINIT: Restarting sensors.");
@@ -239,7 +255,7 @@ void reinitSensors() {
 }
 
 // ------------------------------------------------------------------
-// WiFi reconnect (unchanged)
+// WiFi reconnect
 // ------------------------------------------------------------------
 void WiFiReconnect() {
   if (WiFi.status() == WL_CONNECTED) return;
@@ -265,10 +281,31 @@ void WiFiReconnect() {
 }
 
 // ------------------------------------------------------------------
-// Send aggregated data to server
+// Send data to server (applies calibration offsets to the aggregates)
 // ------------------------------------------------------------------
-void sendData(float avgTemp, float avgPress, float avgHum,
-              float maxWind, int maxPM25, int maxPM10) {
+void sendData(float rawAvgTemp, float rawAvgPress, float rawAvgHum,
+              float rawMaxWind, int rawMaxPM25, int rawMaxPM10) {
+  // Apply calibration offsets
+  float calibTemp = rawAvgTemp + TEMP_CALIB;
+  float calibPress = rawAvgPress + PRESS_CALIB;
+  float calibHum = rawAvgHum + HUM_CALIB;
+  float calibWind = rawMaxWind + WIND_CALIB;
+  int calibPM25 = rawMaxPM25 + PM25_CALIB;
+  int calibPM10 = rawMaxPM10 + PM10_CALIB;
+
+  // Ensure no negative values for PM (optional)
+  if (calibPM25 < 0) calibPM25 = 0;
+  if (calibPM10 < 0) calibPM10 = 0;
+  if (calibWind < 0) calibWind = 0;
+
+  Serial.println("--- Sending to server (calibrated) ---");
+  Serial.print("Calibrated Temp: "); Serial.print(calibTemp);
+  Serial.print(" °C, Press: "); Serial.print(calibPress);
+  Serial.print(" hPa, Hum: "); Serial.print(calibHum);
+  Serial.print(" %, Wind: "); Serial.print(calibWind);
+  Serial.print(" km/h, PM2.5: "); Serial.print(calibPM25);
+  Serial.print(", PM10: "); Serial.println(calibPM10);
+
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("ERR: WiFi not connected");
     for(int i = 0; i < 3; i++) {
@@ -289,7 +326,7 @@ void sendData(float avgTemp, float avgPress, float avgHum,
   char payload[512];
   snprintf(payload, sizeof(payload),
            "{\"pm25\":%d,\"pm10\":%d,\"temp\":%.1f,\"pressure\":%.1f,\"humidity\":%.1f,\"wind_kmh\":%.1f,\"ts\":%lu}",
-           maxPM25, maxPM10, avgTemp, avgPress, avgHum, maxWind, millis());
+           calibPM25, calibPM10, calibTemp, calibPress, calibHum, calibWind, millis());
   char httpBuffer[512];
   int len = snprintf(httpBuffer, sizeof(httpBuffer),
                      "POST %s HTTP/1.1\r\nHost: %s\r\nContent-Type: application/json\r\nContent-Length: %d\r\n\r\n%s",
@@ -380,8 +417,8 @@ void loop() {
       lastValid = millis();
       lastAnySensorOk = millis();
       sensorsNeedReinit = false;
-      storeToBuffer();                // store into rolling buffer
-      printAggregates();              // print aggregates after each read
+      storeToBuffer();                // store raw readings
+      printAggregates();              // print raw aggregates
     } else {
       if (millis() - lastValid > 30000) sensorSeen = false;
       if (millis() - lastAnySensorOk > 60000 && !sensorsNeedReinit) {
@@ -397,16 +434,14 @@ void loop() {
   }
   if (WiFi.status() != WL_CONNECTED) WiFiReconnect();
 
-  // Send data every 10 seconds using current buffer aggregates
+  // Send data every 10 seconds using raw aggregates + calibration
   if (millis() - lastSend >= SEND_INTERVAL) {
     if (bufferCount > 0) {
       float avgTemp, avgPress, avgHum, maxWind;
       int maxPM25, maxPM10;
-      computeAggregates(avgTemp, avgPress, avgHum, maxWind, maxPM25, maxPM10);
-      Serial.println("--- Sending to server ---");
+      computeRawAggregates(avgTemp, avgPress, avgHum, maxWind, maxPM25, maxPM10);
       sendData(avgTemp, avgPress, avgHum, maxWind, maxPM25, maxPM10);
     } else {
-      // No readings at all – send zeros
       Serial.println("WARN: No readings in buffer, sending zeros.");
       sendData(0.0, 0.0, 0.0, 0.0, 0, 0);
     }
