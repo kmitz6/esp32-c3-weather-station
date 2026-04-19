@@ -22,9 +22,9 @@ const char* path     = "/api/sensors";
 float TEMP_CALIB     = -4.0;   // add fixed value
 float PRESS_CALIB    = 15.0;   // add fixed valye
 float HUM_CALIB      = 0.0;    // add fixed value
-float WIND_CALIB     = 0.0;    // multiply
-float PM25_CALIB     = 0.0;      // multiply
-float PM10_CALIB     = 0.0;      // multiply
+float WIND_CALIB     = 1.0;    // multiply
+float PM25_CALIB     = 1.0;      // multiply
+float PM10_CALIB     = 1.0;      // multiply
 // ============================================================
 
 // PMS5003
