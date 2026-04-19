@@ -2,6 +2,9 @@
 
 3D model available @ cults:
 
+https://cults3d.com/en/3d-model/gadget/esp32-c3-super-mini-weather-station-with-air-quality-and-wind-speed-anemometer
+
+<img width="1442" height="953" alt="image" src="https://github.com/user-attachments/assets/f7d194b0-cc8b-4538-a23b-2dc1c127e577" />
 
 
 This project implements a weather data logger for an ESP32 board. It reads data from:
