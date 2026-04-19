@@ -200,4 +200,4 @@ The HTTP POST body is a JSON object:
 
 ## License
 
-This code is provided under the MIT License. Feel free to use, modify, and distribute.
+no license
