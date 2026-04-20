@@ -8,6 +8,8 @@ unsigned long lastAnySensorOk = 0;
 unsigned long lastWifiAttempt = 0;
 bool sensorsNeedReinit = false;
 
+void IRAM_ATTR irISR();
+
 void setup() {
   Serial.begin(115200);
   delay(2000);
@@ -16,7 +18,6 @@ void setup() {
   Serial.println("INFO: Booting weather station");
 
   pinMode(IR_PIN, INPUT_PULLUP);
-  gpio_set_pin_filter(IR_PIN, 1023);
   attachInterrupt(digitalPinToInterrupt(IR_PIN), irISR, FALLING);
   lastWindCalc = millis();
 
