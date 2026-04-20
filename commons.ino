@@ -7,8 +7,6 @@ float windBuffer[BUFFER_SIZE];
 int pm25Buffer[BUFFER_SIZE];
 int pm10Buffer[BUFFER_SIZE];
 
-int bufferIndex = 0;
-int bufferCount = 0;
 
 void storeToBuffer(float temp, float press, float hum, float wind, int pm25, int pm10) {
   tempBuffer[bufferIndex] = temp;
