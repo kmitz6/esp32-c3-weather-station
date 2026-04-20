@@ -25,8 +25,7 @@ void updatePulsesPerMin() {
   unsigned long dt = now - lastWindCalc;
   if (dt >= 3000) {
     float pulsesPerSec = (float)irPulseCount / (dt / 1000.0);
-    int pulsesPerMin = (int)(pulsesPerSec * 60.0);
-    windKmh = pulsesPerMin * 0.012; // 0.012 is an arbitrary value based on another calibrated sensor readings
+    windKmh = pulsesPerSec * 0.125 * 3.6; // Further adjustment done with WIND_CALIB variable - calculation here is vastly simplified: 0.125 - one impulse equals to 12.5cm travel of the wind arm, 3.6 for the kmh conversion
     Serial.print("RAW: Wind - pulses in last ");
     Serial.print(dt);
     Serial.print(" ms: ");
