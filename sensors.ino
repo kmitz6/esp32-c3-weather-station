@@ -4,14 +4,6 @@ HardwareSerial pms(1);
 Adafruit_BMP280 bmp;
 Adafruit_AHTX0 aht;
 
-bool bmp_ok = false;
-bool aht_ok = false;
-
-volatile unsigned long irPulseCount = 0;
-volatile unsigned long lastIrTime = 0;
-float windKmh = 0.0;
-unsigned long lastWindCalc = 0;
-
 void IRAM_ATTR irISR() {
   unsigned long now = micros();
   if (now - lastIrTime > DEBOUNCE_US) {
@@ -25,13 +17,13 @@ void updatePulsesPerMin() {
   unsigned long dt = now - lastWindCalc;
   if (dt >= 3000) {
     float pulsesPerSec = (float)irPulseCount / (dt / 1000.0);
-    windKmh = pulsesPerSec * 0.125 * 3.6; // Further adjustment done with WIND_CALIB variable - calculation here is vastly simplified: 0.125 - one impulse equals to 12.5cm travel of the wind arm, 3.6 for the kmh conversion
+    windKmh = pulsesPerSec * 0.25 * 3.6; // Further adjustment done with WIND_CALIB variable - calculation here is vastly simplified: 0.25 - one impulse equals to 25cm travel of the wind arm, 3.6 for the kmh conversion
     Serial.print("RAW: Wind - pulses in last ");
     Serial.print(dt);
     Serial.print(" ms: ");
     Serial.print(irPulseCount);
     Serial.print(" -> ");
-    Serial.print(pulsesPerMin);
+    Serial.print(pulsesPerSec);
     Serial.print(" pulses/min (~");
     Serial.print(windKmh);
     Serial.println(" kmh)");
