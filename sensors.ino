@@ -26,7 +26,7 @@ void updatePulsesPerMin() {
   if (dt >= 3000) {
     float pulsesPerSec = (float)irPulseCount / (dt / 1000.0);
     int pulsesPerMin = (int)(pulsesPerSec * 60.0);
-    windKmh = pulsesPerMin * 0.04;
+    windKmh = pulsesPerMin * 0.012; // 0.012 is an arbitrary value based on another calibrated sensor readings
     Serial.print("RAW: Wind - pulses in last ");
     Serial.print(dt);
     Serial.print(" ms: ");
