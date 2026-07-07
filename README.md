@@ -1,5 +1,6 @@
 # ESP32 Weather Station with PMS5003, BMP280, AHT20, and Anemometer
 
+3d model is going to be updated - current one fails in heavy rain with wind :(
 3D model available @ cults:
 
 https://cults3d.com/en/3d-model/gadget/esp32-c3-super-mini-weather-station-with-air-quality-and-wind-speed-anemometer
