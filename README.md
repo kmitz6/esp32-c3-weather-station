@@ -204,4 +204,4 @@ The HTTP POST body is a JSON object:
 
 ## License
 
-no license
+do whatever you want tag me if you want i generated most of this anyway
